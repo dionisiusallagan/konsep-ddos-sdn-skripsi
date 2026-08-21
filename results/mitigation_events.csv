@@ -1,0 +1,2 @@
+ts_epoch,ts_iso,event,dpid,src_ip,rate_pps,window_sec,threshold,action,ban_sec
+1787279267.207,2026-08-21T02:27:47.207165+00:00,DETECT_DROP,0x1,10.0.0.1,26,1.0,25,DROP,15
