@@ -74,6 +74,7 @@ from os_ken.controller import ofp_event
 from os_ken.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
 from os_ken.controller.handler import set_ev_cls
 from os_ken.ofproto import ofproto_v1_3
+from os_ken.lib import hub
 from os_ken.lib.packet import (packet, ethernet, ether_types,
                                ipv4, tcp, udp, icmp)
 
@@ -83,6 +84,7 @@ RATE_THRESHOLD = 25     # D4: max paket inisiasi / window per source IP
 BAN_DURATION_SEC = 15   # D5: masa berlaku drop rule (hard_timeout)
 DROP_PRIORITY = 100     # prioritas drop rule (> table-miss = 0)
 CLEANUP_INTERVAL = 30   # interval buang memori IP yang sudah tidak aktif
+STATS_INTERVAL = 5      # interval log statistik packet-in (diagnostik)
 
 # Lokasi CSV hasil mitigasi: <project>/results/mitigation_events.csv
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -109,6 +111,21 @@ class DDoSGuard(app_manager.OSKenApp):
         self.banned_until = {}
 
         self._last_cleanup = time.monotonic()
+
+        # ---- diagnostik ----
+        # penghitung packet-in per interval STATS_INTERVAL detik.
+        # Fungsi: membedakan "controller tidak tersambung" (counter ~0)
+        # vs "controller dibanjiri packet-in" (counter ratusan ribu) saat
+        # serangan berlangsung - penting untuk validasi eksperimen.
+        self._pkt_in_count = 0
+        hub.spawn(self._stats_loop)
+
+    def _stats_loop(self):
+        """Loop periodik utk log statistik (hindari API spawn_periodic yang
+        berbeda antar versi - loop manual selalu kompatibel)."""
+        while True:
+            hub.sleep(STATS_INTERVAL)
+            self._log_stats()
 
         # siapkan file CSV + header sekali saja
         os.makedirs(os.path.dirname(MITIGATION_LOG), exist_ok=True)
@@ -202,6 +219,23 @@ class DDoSGuard(app_manager.OSKenApp):
         self.banned_until = {ip: t for ip, t in self.banned_until.items()
                              if t > now}
 
+    def _log_stats(self):
+        """Log periodik jumlah packet-in & window terbesar (diagnostik).
+
+        Interpretasi saat serangan:
+        - counter tinggi + tidak ada MITIGASI -> controller kewalahan
+          (channel OpenFlow jenuh; pertimbangkan turunkan rate serangan
+          atau optimasi hot-path)
+        - counter ~0 -> switch TIDAK tersambung ke controller ini
+          (proses lama pegang port 6633 / OVS fail-mode standalone)
+        """
+        tops = sorted(((ip, len(dq)) for ip, dq in self.rate_window.items()),
+                      key=lambda x: -x[1])[:3]
+        self.logger.info(
+            'STATS: packet_in/%ds=%d | ip_aktif=%d | top=%s',
+            STATS_INTERVAL, self._pkt_in_count, len(self.rate_window), tops)
+        self._pkt_in_count = 0
+
     # ------------------------------------------------------------------
     # MITIGATION
     # ------------------------------------------------------------------
@@ -216,6 +250,12 @@ class DDoSGuard(app_manager.OSKenApp):
         ofp = datapath.ofproto
         parser = datapath.ofproto_parser
 
+        # Match SENGAJA dibuat luas: HANYA eth_type + ipv4_src.
+        # Artinya SEMUA trafik IPv4 dari IP ini (TCP/UDP/ICMP, port apa pun)
+        # di-drop -> konsisten dengan desain "isolasi IP attacker".
+        # Trade-off (lihat README): false positive memutus seluruh service
+        # di IP tsb, dan spoofing IP korban bisa membanned korban -
+        # risikonya dibatasi oleh hard_timeout (ban otomatis kedaluwarsa).
         match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP,
                                 ipv4_src=src_ip)
         mod = parser.OFPFlowMod(
@@ -246,6 +286,7 @@ class DDoSGuard(app_manager.OSKenApp):
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def packet_in_handler(self, ev):
         """Jalur utama setiap paket: forward + hitung rate + mitigasi."""
+        self._pkt_in_count += 1          # diagnostik (lihat _log_stats)
         msg = ev.msg
         datapath = msg.datapath
         ofp = datapath.ofproto

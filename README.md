@@ -198,12 +198,52 @@ Kejadian mitigasi tercatat di `results/mitigation_events.csv`.
 - Baru satu switch; multi-switch butuh registry datapath.
 - Mode tanpa flow caching tidak skala untuk produksi (bobot CPU controller).
 
+## Tahap 2: Eksperimen Otomatis (`experiments/run_experiment.py`)
+
+Menjalankan 3 skenario uji secara terpisah dan mencatat semua metrik ke `results/`.
+
+### Menjalankan
+
+```bash
+source ~/ddos-venv/bin/activate
+cd /mnt/c/Dionisius/SkripsiProject/experiments
+
+# skenario dijalankan SATU PER SATU (masing-masing membangun jaringan sendiri):
+sudo -E python run_experiment.py --scenario baseline   # trafik normal saja
+sudo -E python run_experiment.py --scenario single     # flooding murni
+sudo -E python run_experiment.py --scenario mixed      # flooding + trafik normal
+```
+
+Opsi: `--warmup` (default 5s), `--flood-duration` (10s), `--post` (20s, harus ≥ ban 15s), `--ping-interval` (0.2s).
+
+### Output di `results/`
+
+| File | Isi |
+|---|---|
+| `exp_summary.csv` | 1 baris per run: waktu deteksi, jumlah drop rule, fp_bans, % loss per host legitimate, CPU/mem controller |
+| `exp_timeseries_<skenario>_<ts>.csv` | sampel tiap 0.5s: t, cpu_pct, mem_pct, jumlah drop rule aktif |
+| `controller_<skenario>_<ts>.log` | log controller utk run tsb (bukti STATS/MITIGASI) |
+| `mitigation_events.csv` | event mitigasi (dari ddos_guard.py) |
+
+### Hasil Verifikasi (WSL2, flood ±173k pps)
+
+| Metrik | baseline | single | mixed |
+|---|---|---|---|
+| Waktu deteksi | – (tidak ada deteksi ✓) | **0,65 s** | **0,64 s** |
+| Drop rule terpasang | 0 ✓ | 1 | 1 |
+| False-positive ban | 0 ✓ | 0 ✓ | **0 ✓** |
+| Loss host legitimate | 0% | – (tanpa trafik legit) | **0%** ✓ |
+| CPU controller (avg/max) | 1,1 / 2,0% | 1,1 / 53,0% | 2,0 / 31,4% |
+
+Interpretasi cepat (bahan bab hasil): deteksi konsisten < 1 detik; trafik legitimate sama sekali tidak terpengaruh (FPR = 0); lonjakan CPU controller saat serangan (53%) turun setelah drop rule memblokir paket attacker di switch — efek mitigasi terlihat langsung di timeseries.
+
 ## Langkah Selanjutnya
 
 1. ~~Topologi dasar + L2 switch~~ ✅
 2. ~~Deteksi packet-in rate + auto-DROP + logging CSV~~ ✅
-3. **Traffic generator lengkap** (trafik normal terjadwal + skenario UDP flood)
-4. **Skrip eksperimen**: baseline / serangan tunggal / serangan campuran → CSV metrik (waktu deteksi, jumlah drop rule, CPU proses controller via psutil)
+3. ~~Traffic generator (flood_scapy.py; trafik normal = ping stream di runner)~~ ✅
+4. ~~Skrip eksperimen 3 skenario + metrik~~ ✅
+5. Opsional lanjutan: multi-switch, source IP spoofed (`--rand-source`) + agregasi, variasi threshold/window utk kurva ROC, grafik matplotlib dari timeseries
 
 ---
 

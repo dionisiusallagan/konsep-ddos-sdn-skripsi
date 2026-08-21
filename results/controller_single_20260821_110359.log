@@ -1,0 +1,23 @@
+/home/dionisius/ddos-venv/lib/python3.12/site-packages/os_ken/lib/hub.py:160: EventletDeprecationWarning: 
+Eventlet is deprecated. It is currently being maintained in bugfix mode, and
+we strongly recommend against using it for new projects.
+
+If you are already using Eventlet, we recommend migrating to a different
+framework.  For more detail see
+https://eventlet.readthedocs.io/en/latest/asyncio/migration.html
+
+  import eventlet
+1 RLock(s) were not greened, to fix this error make sure you run eventlet.monkey_patch() before importing any other modules.
+loading app ddos_guard.py
+loading app os_ken.controller.ofp_handler
+instantiating app ddos_guard.py of DDoSGuard
+instantiating app os_ken.controller.ofp_handler of OFPHandler
+Switch 1 terhubung, table-miss terpasang
+STATS: packet_in/5s=25 | ip_aktif=0 | top=[]
+STATS: packet_in/5s=5 | ip_aktif=0 | top=[]
+MITIGASI: DROP rule terpasang utk 10.0.0.1 (hard_timeout=15s)
+STATS: packet_in/5s=4611 | ip_aktif=1 | top=[('10.0.0.1', 26)]
+STATS: packet_in/5s=1 | ip_aktif=1 | top=[('10.0.0.1', 26)]
+STATS: packet_in/5s=0 | ip_aktif=1 | top=[('10.0.0.1', 26)]
+STATS: packet_in/5s=2 | ip_aktif=1 | top=[('10.0.0.1', 26)]
+STATS: packet_in/5s=3 | ip_aktif=1 | top=[('10.0.0.1', 26)]
