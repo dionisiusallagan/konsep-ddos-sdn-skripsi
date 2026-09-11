@@ -80,7 +80,10 @@ from os_ken.lib.packet import (packet, ethernet, ether_types,
 
 # ========================== KONFIGURASI ==================================
 WINDOW_SEC = 1.0        # D3: panjang sliding window (detik)
-RATE_THRESHOLD = 25     # D4: max paket inisiasi / window per source IP
+# D4: max paket inisiasi / window per source IP.
+# Bisa di-override via env RATE_THRESHOLD (untuk threshold_sweep), default 25.
+# TIDAK mengubah logika deteksi — hanya ambang batas yang dikonfigurasi.
+RATE_THRESHOLD = int(os.environ.get('RATE_THRESHOLD', '25'))
 BAN_DURATION_SEC = 15   # D5: masa berlaku drop rule (hard_timeout)
 DROP_PRIORITY = 100     # prioritas drop rule (> table-miss = 0)
 CLEANUP_INTERVAL = 30   # interval buang memori IP yang sudah tidak aktif
@@ -118,14 +121,6 @@ class DDoSGuard(app_manager.OSKenApp):
         # vs "controller dibanjiri packet-in" (counter ratusan ribu) saat
         # serangan berlangsung - penting untuk validasi eksperimen.
         self._pkt_in_count = 0
-        hub.spawn(self._stats_loop)
-
-    def _stats_loop(self):
-        """Loop periodik utk log statistik (hindari API spawn_periodic yang
-        berbeda antar versi - loop manual selalu kompatibel)."""
-        while True:
-            hub.sleep(STATS_INTERVAL)
-            self._log_stats()
 
         # siapkan file CSV + header sekali saja
         os.makedirs(os.path.dirname(MITIGATION_LOG), exist_ok=True)
@@ -139,6 +134,19 @@ class DDoSGuard(app_manager.OSKenApp):
         self.logger.info('DDoSGuard aktif | window=%.1fs threshold=%d pps '
                          'ban=%ds | log=%s', WINDOW_SEC, RATE_THRESHOLD,
                          BAN_DURATION_SEC, MITIGATION_LOG)
+
+        # green thread statistik - sengaja dipanggil PALING AKHIR di
+        # __init__ agar tidak ada kode __init__ yang tertinggal di bawahnya
+        # (pelajaran dari bug dead-code: loop tak berujung menelan blok
+        # yang diletakkan setelahnya).
+        hub.spawn(self._stats_loop)
+
+    def _stats_loop(self):
+        """Loop periodik utk log statistik (hindari API spawn_periodic yang
+        berbeda antar versi - loop manual selalu kompatibel)."""
+        while True:
+            hub.sleep(STATS_INTERVAL)
+            self._log_stats()
 
     # ------------------------------------------------------------------
     # SWITCH SETUP

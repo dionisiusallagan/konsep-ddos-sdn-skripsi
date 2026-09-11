@@ -1,0 +1,26 @@
+/home/dionisius/ddos-venv/lib/python3.12/site-packages/os_ken/lib/hub.py:160: EventletDeprecationWarning: 
+Eventlet is deprecated. It is currently being maintained in bugfix mode, and
+we strongly recommend against using it for new projects.
+
+If you are already using Eventlet, we recommend migrating to a different
+framework.  For more detail see
+https://eventlet.readthedocs.io/en/latest/asyncio/migration.html
+
+  import eventlet
+1 RLock(s) were not greened, to fix this error make sure you run eventlet.monkey_patch() before importing any other modules.
+loading app ddos_guard50.py
+loading app os_ken.controller.ofp_handler
+instantiating app ddos_guard50.py of DDoSGuard
+DDoSGuard aktif | window=1.0s threshold=25 pps ban=15s | log=/mnt/c/Dionisius/SkripsiProject/scale50/results/mitigation_events.csv
+instantiating app os_ken.controller.ofp_handler of OFPHandler
+Switch 1 terhubung, table-miss terpasang
+STATS: packet_in/5s=13 | ip_aktif=0 | top=[]
+STATS: packet_in/5s=53 | ip_aktif=0 | top=[]
+STATS: packet_in/5s=9 | ip_aktif=3 | top=[('10.0.0.2', 1), ('10.0.0.25', 1), ('10.0.0.50', 1)]
+MITIGASI: DROP rule terpasang utk 10.0.0.1 (hard_timeout=15s)
+STATS: packet_in/5s=3120 | ip_aktif=4 | top=[('10.0.0.1', 26), ('10.0.0.2', 1), ('10.0.0.25', 1)]
+STATS: packet_in/5s=0 | ip_aktif=4 | top=[('10.0.0.1', 26), ('10.0.0.2', 1), ('10.0.0.25', 1)]
+STATS: packet_in/5s=6 | ip_aktif=4 | top=[('10.0.0.1', 26), ('10.0.0.2', 1), ('10.0.0.25', 1)]
+STATS: packet_in/5s=29 | ip_aktif=4 | top=[('10.0.0.1', 26), ('10.0.0.2', 1), ('10.0.0.25', 1)]
+STATS: packet_in/5s=16 | ip_aktif=4 | top=[('10.0.0.1', 26), ('10.0.0.2', 1), ('10.0.0.25', 1)]
+STATS: packet_in/5s=0 | ip_aktif=4 | top=[('10.0.0.1', 26), ('10.0.0.2', 1), ('10.0.0.25', 1)]

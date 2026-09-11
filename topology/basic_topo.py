@@ -19,20 +19,28 @@ from mininet.log import setLogLevel, info
 
 
 class DDosTopo(Topo):
-    """Topologi sederhana: 1 switch, 5 host, 1 controller remote."""
+    """Topologi dasar: 1 switch, 1 controller remote, N host legitimate.
 
-    def build(self):
+    Konvensi penomoran (penting, dipakai runner):
+      h1                 = attacker (konsisten di semua skenario)
+      h2 .. h{n_iot+1}   = host legitimate (IoT edge nodes)
+      h{n_iot+2}         = victim / server tujuan
+    Default n_iot=3 -> topologi 5 host (h1..h5), identik desain awal.
+    Naikkan n_iot untuk skenario flash_crowd (5-10 host legitimate).
+    """
+
+    def build(self, n_iot=3):
         # Switch OpenFlow 1.3
         s1 = self.addSwitch('s1', protocols='OpenFlow13')
 
-        # Host h1-h4: IoT edge nodes (potensi attacker)
-        # Host h5: victim/server tujuan
+        # Total host = attacker(1) + legitimate(n_iot) + victim(1) = n_iot+2
+        # h1 = attacker, h2..h{n_iot+1} = legit, h{n_iot+2} = victim
         hosts = []
-        for i in range(1, 6):
+        for i in range(1, n_iot + 3):
             h = self.addHost(f'h{i}', ip=f'10.0.0.{i}/24')
             hosts.append(h)
 
-        # Koneksi semua host ke switch dengan bandwidth limit (opsional, untuk realisme)
+        # Koneksi semua host ke switch dengan bandwidth limit (opsional)
         for h in hosts:
             self.addLink(h, s1, bw=100, delay='1ms', loss=0)
 

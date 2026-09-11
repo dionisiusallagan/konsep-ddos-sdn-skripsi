@@ -225,15 +225,17 @@ Opsi: `--warmup` (default 5s), `--flood-duration` (10s), `--post` (20s, harus �
 | `controller_<skenario>_<ts>.log` | log controller utk run tsb (bukti STATS/MITIGASI) |
 | `mitigation_events.csv` | event mitigasi (dari ddos_guard.py) |
 
-### Hasil Verifikasi (WSL2, flood ±173k pps)
+### Hasil Verifikasi Final (WSL2, SYN flood ±170rb pps, kode final)
 
 | Metrik | baseline | single | mixed |
 |---|---|---|---|
-| Waktu deteksi | – (tidak ada deteksi ✓) | **0,65 s** | **0,64 s** |
+| Waktu deteksi | – (tidak ada deteksi ✓) | **0,64 s** | **0,86 s** |
 | Drop rule terpasang | 0 ✓ | 1 | 1 |
 | False-positive ban | 0 ✓ | 0 ✓ | **0 ✓** |
 | Loss host legitimate | 0% | – (tanpa trafik legit) | **0%** ✓ |
-| CPU controller (avg/max) | 1,1 / 2,0% | 1,1 / 53,0% | 2,0 / 31,4% |
+| CPU controller (avg/max) | 1,0 / 3,9% | 0,5 / 27,5% | 1,8 / 54,9% |
+
+Data lengkap: `results/exp_summary.csv` (histori run lama: `exp_summary_archive.csv`).
 
 Interpretasi cepat (bahan bab hasil): deteksi konsisten < 1 detik; trafik legitimate sama sekali tidak terpengaruh (FPR = 0); lonjakan CPU controller saat serangan (53%) turun setelah drop rule memblokir paket attacker di switch — efek mitigasi terlihat langsung di timeseries.
 
