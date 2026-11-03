@@ -342,3 +342,365 @@ diverifikasi cepat via 3 ping sampel. Metrik yang sama direkam ke
 `scale50/results/exp_summary.csv`, siap dibandingkan langsung dengan
 `results/exp_summary.csv` Fase 1 (tabel perbandingannya ada di
 `scale50/README.md`).
+
+---
+
+# BAGIAN III — FASE P1: PERBANDINGAN TIGA ALGORITME + LOAD SWEEP
+
+> **Penting soal nomor baris.** BAGIAN I dan BAGIAN II ditulis untuk versi kode
+> **sebelum** Tahap C/D. Dua file yang berubah sejak itu adalah
+> `experiments/run_experiment.py` (423 → 1.046 baris) dan
+> `traffic/flood_scapy.py` (86 → 108 baris); nomor baris di BAGIAN I §4–§5
+> **tidak lagi** menunjuk baris yang sama. Perubahan keduanya didokumentasikan
+> ulang di §III.3 dan §III.4 di bawah. `controller/ddos_guard.py`,
+> `controller/l2_switch.py`, topologi, dan `scale50/` **tidak diubah**, sehingga
+> BAGIAN I §1–§3 dan seluruh BAGIAN II tetap valid.
+
+Bagian ini membedah lima file inti P1:
+
+| § | File | Baris | Peran |
+|---|---|---|---|
+| III.1 | `controller/ddos_guard_s2td.py` | 497 | Algoritme B: S2TD dua tahap berbasis statistik flow |
+| III.2 | `controller/ddos_guard_entropy.py` | 330 | Algoritme C: Shannon entropy IP sumber |
+| III.3 | `traffic/flood_scapy.py` | 108 | Flooder + pacing + penanda `t0_epoch` |
+| III.4 | `experiments/run_experiment.py` | 1.046 | Runner + mode `--algo` + metrik compare |
+| III.5 | `experiments/run_sweep_compare.py` | 426 | Orkestrator load sweep + agregasi |
+
+---
+
+## III.1 `controller/ddos_guard_s2td.py` (497 baris) — S2TD
+
+### III.1a Docstring & import (baris 1–102)
+
+| Baris | Kode | Penjelasan |
+|---|---|---|
+| 1–88 | Docstring modul | Menjelaskan arsitektur dua tahap, pemetaan ke pseudocode proposal, perbedaan sengaja vs baseline, delapan keputusan desain **S1–S8**, dan keterbatasan yang diakui. Bahan langsung bab metodologi. |
+| 90–102 | `import csv, os, time` / `defaultdict` / `datetime, timezone` / `app_manager`, `ofp_event`, dispatcher / `ofproto_v1_3` / `hub` / `packet, ethernet, ethertypes, ipv4` | `hub` = green-thread os-ken untuk loop polling. Tidak ada `math`/`deque` karena deteksi memakai counter switch, bukan window paket. |
+
+**Delapan keputusan desain (S1–S8) yang tertulis di docstring** — ini yang dikutip di skripsi:
+
+- **S1** — satu `FlowStatsRequest` per `T_poll` memberi data agregat (Tahap 1) sekaligus per-`src` (Tahap 2); tidak ada request tambahan saat terpicu → overhead control-channel konstan 1 msg/detik/switch.
+- **S2** — EWMA **dibekukan** saat terpicu; `mu` hanya belajar dari sampel normal, agar serangan tidak menaikkan ambangnya sendiri.
+- **S3** — verifikasi "berturut-turut" ketat: poll tak-terpicu me-reset semua counter konsekutif.
+- **S4** — flow DROP (`priority=100`) dikeluarkan dari agregat, tetapi `prev_count`-nya tetap diingat agar tidak ada lonjakan delta saat rule kedaluwarsa.
+- **S5** — counter reset (flow lahir kembali dengan `cur < prev`) ditangani `delta = cur`.
+- **S6** — `PROTECTED_IPS` tidak pernah di-ban: flow counter buta arah, sehingga balasan victim bisa memenuhi kriteria.
+- **S7** — CSV terpisah, 10 kolom identik baseline; `threshold` = ambang efektif, `window_sec` = `T_poll`.
+- **S8** — ambang pemicu = `max(k_auto*mu, TRIGGER_FLOOR)`; lantai absolut mencegah ambang ~0 saat idle.
+
+### III.1b Konfigurasi (baris 104–133)
+
+| Baris | Kode | Penjelasan |
+|---|---|---|
+| 107 | `T_POLL = float(env S2TD_T_POLL, 1.0)` | Interval polling statistik (detik). Menentukan resolusi waktu deteksi. |
+| 108 | `ALPHA = float(env S2TD_ALPHA, 0.3)` | Bobot EWMA baseline (`mu`). |
+| 109 | `K_AUTO = float(env S2TD_K_AUTO, 3.0)` | Pengali ambang adaptif `k*mu`. |
+| 110 | `T_VERIFY = float(env S2TD_T_VERIFY, 50)` | Ambang per-sumber (pps) di Tahap 2. **Parameter terkunci P1 = 50 pps.** |
+| 113 | `TRIGGER_FLOOR = float(env S2TD_TRIGGER_FLOOR, str(T_VERIFY))` | Lantai ambang pemicu (Tahap A). Default mengikuti `T_verify` agar agresivitas Tahap 1 sejalan dengan gerbang Tahap 2. |
+| 114 | `T_CONFIRM = int(env S2TD_T_CONFIRM, 2)` | Jumlah poll berturut yang harus lolos `T_verify` sebelum DROP. |
+| 115 | `TOP_N = int(env S2TD_TOP_N, 5)` | Kandidat teratas yang diperiksa tiap poll terpicu. |
+| 116 | `WARMUP_POLLS = int(env S2TD_WARMUP_POLLS, 3)` | Jumlah poll awal untuk belajar baseline; tidak ada aksi. |
+| 117–118 | `BAN_DURATION_SEC=15` / `DROP_PRIORITY=100` | **Sama persis baseline** agar bentuk mitigasi bukan variabel pembeda. |
+| 119 | `FWD_PRIORITY = 1` | Prioritas flow forwarding, di atas table-miss (0). |
+| 120–121 | `IDLE_TIMEOUT=10` / `CLEANUP_INTERVAL=30` | Flow forwarding kedaluwarsa 10 s; state basi dibuang tiap 30 s. |
+| 125–127 | `PROTECTED_IPS = {...env S2TD_PROTECTED_IPS...}` | Daftar IP yang tak boleh di-ban (default `10.0.0.5`; scale50 → `10.0.0.51`). |
+| 130–133 | `MITIGATION_LOG = env S2TD_LOG or results/mitigation_events_s2td.csv` | CSV terpisah, bisa di-override runner. |
+
+### III.1c Inisialisasi (baris 136–184)
+
+| Baris | Kode | Penjelasan |
+|---|---|---|
+| 136–142 | `class DDoSGuardS2TD(OSKenApp)` / `OFP_VERSIONS` / `super().__init__` | Kelas aplikasi os-ken, OpenFlow 1.3. |
+| 145 | `self.mac_to_port = {}` | State L2 learning untuk forwarding. |
+| 148 | `self.datapaths = {}` | Registry datapath (multi-switch ready) — diisi `_state_change_handler`. |
+| 151–153 | `self._mu=None` / `self._eff_threshold=TRIGGER_FLOOR` / `self._poll_count=0` | State Tahap 1. `_eff_threshold` menyimpan ambang poll terakhir untuk CSV/log. |
+| 154 | `self._last_poll_ts = None` | Untuk menghitung `dt` **terukur**, bukan mengasumsikan `T_poll`. |
+| 158–162 | `_prev_counts`, `_flow_last_seen`, `_src_consec`, `_protect_flag`, `banned_until` | State Tahap 2: counter mentah per flow, waktu terakhir flow terlihat, hitungan konsekutif per sumber, penanda sudah-warning untuk IP terproteksi, dan waktu kedaluwarsa ban. |
+| 164 | `self._last_cleanup = time.monotonic()` | Jadwal housekeeping. |
+| 166–172 | buat folder + tulis header CSV bila belum ada | Skema 10 kolom identik baseline: `ts_epoch,ts_iso,event,dpid,src_ip,rate_pps,window_sec,threshold,action,ban_sec`. |
+| 174–180 | `self.logger.info('S2TD aktif | ...')` | Mencetak **nilai konfigurasi aktual** (bukti eksperimen bahwa env yang dipakai benar). |
+| 184 | `hub.spawn(self._poll_loop)` | **Spawn paling akhir**: tidak boleh ada kode `__init__` setelah loop tak berujung (pelajaran dead-code dari baseline). |
+
+### III.1d Tahap 1 paruh 1 — loop polling (baris 186–209)
+
+| Baris | Kode | Penjelasan |
+|---|---|---|
+| 189–195 | `def _poll_loop(self):` / docstring | Loop manual `while True` + `hub.sleep(T_POLL)`, bukan `spawn_periodic`, agar kompatibel antar versi os-ken. |
+| 197–198 | `hub.sleep(T_POLL)` / `for dpid, dp in list(self.datapaths.items())` | Satu request **per switch** tiap interval; salinan list agar aman bila registry berubah. |
+| 200–206 | `OFPFlowStatsRequest(dp, 0, OFPTT_ALL, OFPP_ANY, OFPG_ANY)` | `table_id=ALL` **eksplisit**: satu balasan mencakup table-miss + forwarding + drop, sehingga agregat = total switch. |
+| 208–209 | `except Exception as e: logger.debug(...)` | Switch mati di tengah poll tidak boleh mematikan loop. |
+
+### III.1e Registry switch & table-miss (baris 211–253)
+
+| Baris | Kode | Penjelasan |
+|---|---|---|
+| 214–233 | `_state_change_handler` + `EventOFPStateChange` | `MAIN_DISPATCHER` → daftarkan `dp`; `DEAD_DISPATCHER` → hapus. Baseline hanya mengenal satu switch; di sini sudah siap multi-switch. |
+| 235–253 | `switch_features_handler` | Pasang table-miss `priority=0` → controller, identik baseline. Bedanya konsekuensi: paket berikutnya dari pasangan IP yang sama akan match flow forwarding (`FWD_PRIORITY`) dan **tidak** packet-in lagi. |
+
+### III.1f Forwarding + flow install (baris 255–310)
+
+| Baris | Kode | Penjelasan |
+|---|---|---|
+| 258–263 | `packet_in_handler` + docstring | **Sengaja tanpa logika deteksi**: hot-path harus semurah mungkin; deteksi pindah ke reply stats 1/detik. |
+| 264–278 | `msg`, `dp`, `in_port`, parse Ethernet, abaikan LLDP, update `mac_to_port`, tentukan `out_port` | Pola L2 learning standar. |
+| 281–286 | `ip4 = pkt.get_protocol(ipv4.ipv4)` / `if ip4 and out_port != OFPP_FLOOD:` | Flow **hanya** untuk IPv4 unicast yang port keluarnya sudah diketahui. ARP/broadcast/flood tidak di-cache agar tabel tidak penuh sampah satu-paket. |
+| 287–295 | `OFPMatch(eth_type=IP, ipv4_src, ipv4_dst)` / `OFPFlowMod(priority=FWD_PRIORITY, idle_timeout=IDLE_TIMEOUT, buffer_id=...)` | Match per **pasangan IP** — inilah sumber counter yang dipoll Tahap 2. `idle_timeout` mencegah flow abadi. |
+| 298–299 | `if msg.buffer_id != OFP_NO_BUFFER: return` | Paket ter-buffer diteruskan switch **melalui flow baru** (masuk counter); tak perlu packet-out terpisah. |
+| 301–304 | `OFPPacketOut(...)` | Fallback untuk paket tanpa buffer / non-IPv4. |
+| 309–310 | `packet_in_handler = set_ev_cls(EventOFPPacketIn, MAIN_DISPATCHER)(packet_in_handler)` | Pendaftaran handler dipisah dari definisi agar blok Tahap 2 mudah ditemukan saat sidang; fungsional identik decorator. |
+
+### III.1g Tahap 1 paruh 2 + Tahap 2 (baris 312–445)
+
+| Baris | Kode | Penjelasan |
+|---|---|---|
+| 315–326 | `_match_field(match, field)` | Ambil field `OFPMatch` dengan `try/except` (bukan `.get`) karena perilaku akses berbeda antar versi parser. |
+| 328–336 | `flow_stats_reply_handler` + docstring | Satu balasan stats memicu Tahap 1 lalu (bila terpicu) Tahap 2. `dt` diukur monotonic agar rate akurat walau green thread bergeser. |
+| 337–345 | `dp/dpid/now_mono` / `dt` / `_last_poll_ts` / `_poll_count += 1` / `_cleanup_state` | Bila `dt <= 0` dipakai `T_poll` sebagai pengaman. Housekeeping dijalankan tiap reply. |
+| 347–353 | `agg_delta=0` / `src_delta=defaultdict` / loop `stat in ev.msg.body` / `key=(dpid,priority,src,dst)` / `cur=packet_count` | Menyiapkan agregat dan delta per sumber. |
+| 355–361 | `delta = (cur-prev) if (prev is not None and cur >= prev) else cur` / simpan `_prev_counts` & `_flow_last_seen` | **S5**: flow baru / counter reset → `delta=cur`. |
+| 362–363 | `if stat.priority == DROP_PRIORITY: continue` | **S4**: trafik yang sudah dimitigasi tidak dihitung, tetapi counter-nya tetap diingat. |
+| 364–368 | `agg_delta += delta` / `if src: src_delta[src] += delta` | Flow tanpa `ipv4_src` (table-miss) hanya masuk agregat. |
+| 368 | `agg_rate = agg_delta / dt` | Rate agregat switch (pps). |
+| 376–378 | `triggered=False` / `if self._mu is None: self._mu = agg_rate` | Poll pertama hanya menginisialisasi baseline; tidak boleh memicu Tahap 2. Inisialisasi dulu mencegah `UnboundLocalError`. |
+| 383–387 | `eff_threshold = max(K_AUTO*mu, TRIGGER_FLOOR)` / `self._eff_threshold = ...` / `if poll_count > WARMUP_POLLS and agg_rate > eff_threshold: triggered = True` | **S8**: lantai absolut menutup celah ambang ~0 saat idle. `_eff_threshold` dipakai CSV & log TRIGGER. |
+| 390–391 | `if not triggered: self._mu = ALPHA*agg_rate + (1-ALPHA)*(self._mu or 0.0)` | **S2**: `mu` hanya belajar dari sampel normal. |
+| 393–394 | `if self._poll_count <= WARMUP_POLLS: return` | Masa belajar: tidak ada aksi. |
+| 395–397 | `if poll_count % 5 == 0: logger.info('S2TD POLL ...')` | Log diagnostik berkala. |
+| 398–403 | `if not triggered:` reset semua `_src_consec`, `_protect_flag.clear()`, `return` | **S3**: poll tak-terpicu memutus rantai konfirmasi. |
+| 405–408 | `logger.info('S2TD TRIGGER ...')` | Bukti pemicu Tahap 2 beserta komponen ambang. |
+| 411 | `ranked = sorted(src_delta.items(), key=lambda kv: -kv[1])[:TOP_N]` | Ambil top-N sumber dengan delta terbesar. |
+| 412–420 | `active=set()` / loop `src, pkts` / lewati yang sedang diban / `rate = pkts/dt` / `if rate <= T_VERIFY: reset; continue` | Verifikasi ambang per-sumber; sumber di bawah `T_verify` tidak menambah hitungan. |
+| 421–427 | `_src_consec[src] += 1` / log VERIFY / `if n < T_CONFIRM: continue` | Konfirmasi **berturut-turut**; log menampilkan `n/T_confirm`. |
+| 429–438 | `if src in PROTECTED_IPS:` warning sekali per siklus, reset counter, `continue` | **S6**: korban/server tidak pernah di-ban; upaya ini hanya di log (tidak mengotori CSV). |
+| 439–442 | `_install_drop(dp, src)` / `banned_until[...]` / `_log_event(...)` / reset counter | Mitigasi + pencatatan + mulai masa ban. |
+| 443–445 | reset sumber yang tidak lagi aktif | Mencegah hitungan "setengah jalan" bertahan saat sumber keluar dari top-N. |
+
+### III.1h Mitigasi, logging, housekeeping (baris 447–497)
+
+| Baris | Kode | Penjelasan |
+|---|---|---|
+| 450–465 | `_install_drop(dp, src_ip)` | Match `eth_type=IP, ipv4_src`; `instructions=[]` = DROP; `priority=DROP_PRIORITY`; `hard_timeout=BAN_DURATION_SEC`. **Identik baseline** agar bentuk mitigasi bukan variabel pembeda. |
+| 467–482 | `_log_event(dpid, src_ip, rate)` | Tulis 10 kolom: `event='S2TD_DETECT_DROP'`, `rate_pps`, `window_sec=T_POLL`, `threshold=_eff_threshold`, `action='DROP'`, `ban_sec`. Beda isi vs baseline hanya identitas algoritme + ambang efektif. |
+| 484–497 | `_cleanup_state(now)` | Tiap `CLEANUP_INTERVAL`: buang `_prev_counts`/`_flow_last_seen` yang basi, hapus `_src_consec` bernilai 0, dan buang entri `banned_until` yang sudah kedaluwarsa → memori datar. |
+
+---
+
+## III.2 `controller/ddos_guard_entropy.py` (330 baris) — Shannon Entropy
+
+### III.2a Docstring, import, konfigurasi (baris 1–99)
+
+| Baris | Kode | Penjelasan |
+|---|---|---|
+| 1–61 | Docstring modul | Posisi algoritme C, arsitektur yang **disamakan** dengan baseline, lima keputusan desain **E1–E5**, dan keterbatasan. |
+| 63–76 | `csv, math, os, time` / `defaultdict, deque` / `datetime, timezone` / import os-ken & `packet, ethernet, ether_types, ipv4, tcp, udp, icmp` | `deque` = sliding window; `math.log2` = entropi. |
+| 81 | `ENTROPY_WINDOW = float(env, 1.0)` | Panjang window sliding (detik). |
+| 82 | `ENTROPY_THRESHOLD = float(env, 1.0)` | Ambang entropi (bit). Di bawah nilai ini → indikasi serangan. |
+| 83 | `ENTROPY_MIN_PKTS = int(env, 30)` | **E3**: minimum sampel; mencegah entropi dihitung dari 2–3 paket. |
+| 84 | `EVAL_INTERVAL = 0.5` | **E4**: evaluasi entropi maksimal tiap 0,5 s agar biaya tidak dibayar per paket; window tetap sliding per paket. |
+| 85–86 | `BAN_DURATION_SEC=15` / `DROP_PRIORITY=100` | **E5**: identik baseline. |
+| 87 | `STATS_INTERVAL = 5` | Interval log diagnostik `H=...`. |
+| 91–93 | `PROTECTED_IPS = {...env ENTROPY_PROTECTED_IPS...}` | IP yang tak boleh di-ban (victim). |
+| 96–99 | `MITIGATION_LOG = env ENTROPY_LOG or results/mitigation_events_entropy.csv` | CSV terpisah, skema 10 kolom identik. |
+
+### III.2b Inisialisasi & switch setup (baris 102–154)
+
+| Baris | Kode | Penjelasan |
+|---|---|---|
+| 102–108 | `class EntropyGuard(OSKenApp)` / `OFP_VERSIONS` / `super().__init__` | Aplikasi os-ken OpenFlow 1.3. |
+| 111 | `self.mac_to_port = {}` | State L2 learning. |
+| 114 | `self.window = deque()` | **Sliding window** `[(monotonic_ts, src_ip), ...]`. |
+| 115 | `self.counts = defaultdict(int)` | Jumlah paket per source IP di dalam window. |
+| 117–120 | `_last_eval`, `_last_stats`, `_last_protect_log`, `banned_until` | Penjadwalan evaluasi/log + masa ban. |
+| 122–128 | buat folder + header CSV bila belum ada | Skema 10 kolom. |
+| 130–135 | `logger.info('EntropyGuard aktif | ...')` | Mencetak konfigurasi aktual (bukti eksperimen). |
+| 140–154 | `switch_features_handler` | Table-miss `priority=0` → controller, identik baseline. |
+
+### III.2c Deteksi: filter, window, entropi (baris 156–252)
+
+| Baris | Kode | Penjelasan |
+|---|---|---|
+| 159–186 | `_initiation_source(pkt)` | **E2**: filter paket inisiasi disalin persis dari baseline — TCP SYN murni, semua UDP, ICMP echo request. Balasan victim tidak dihitung agar distribusi sumber tidak terdistorsi. |
+| 188–198 | `_update_window(src_ip, now)` | Buang entri lebih tua dari `now - WINDOW` (decrement & hapus key bila 0), tambahkan paket baru, kembalikan `N`. |
+| 200–207 | `_shannon_entropy(counts, total)` | `H = -Σ p_i log2(p_i)` dalam bit. |
+| 209–252 | `_evaluate(datapath, now, total)` | Inti keputusan: (216–218) batasi tiap `EVAL_INTERVAL`; (219–220) `N < MIN_PKTS` → tidak evaluasi; (222) hitung `H`; (223) `top_ip, top_n`; (227–233) log diagnostik tiap 5 s + bersihkan `banned_until`; (235–236) `H >= THRESHOLD` → distribusi wajar; (239–245) **proteksi victim** — bila sumber dominan adalah IP terproteksi, warning berkala dan tidak ban; (246–247) sedang diban → biarkan kedaluwarsa; (249–252) hitung rate, pasang DROP, catat `banned_until`, tulis CSV. |
+| 249 | `rate = top_n / ENTROPY_WINDOW` | Rate informatif; pada window yang baru setengah terisi nilainya bisa ≈0,5× nominal — alasan `detected_rate_pps` tidak sebanding antar algoritme. |
+
+### III.2d Mitigasi, logging, packet-in (baris 254–330)
+
+| Baris | Kode | Penjelasan |
+|---|---|---|
+| 257–268 | `_install_drop(datapath, src_ip)` | **E5**: match `ipv4_src`, `priority=DROP_PRIORITY`, `instructions=[]`, `hard_timeout=BAN_DURATION_SEC` — identik baseline. |
+| 270–287 | `_log_event(dpid, src_ip, rate, entropy)` | Tulis 10 kolom: `event='ENTROPY_DETECT_DROP'`, `threshold=ENTROPY_THRESHOLD` (statis, bit), `window_sec=ENTROPY_WINDOW`. Nilai `H` keputusan hanya di log konsol agar skema CSV tetap identik. |
+| 292–330 | `packet_in_handler` | (300–303) parse & abaikan LLDP; (305–310) belajar MAC & tentukan `out_port`; (312–316) **packet-out tanpa FlowMod** (D1: tanpa flow caching); (319–320) ambil `src_ip` hanya untuk paket inisiasi; (326–327) sumber yang sedang diban dilewati (jaring pengaman); (329–330) update window lalu evaluasi. |
+
+---
+
+## III.3 `traffic/flood_scapy.py` (108 baris) — Flooder versi Tahap C/D
+
+Bagian yang **tidak berubah** dari BAGIAN I §4: `render_packet` (28–37), argparse dasar (40–49), raw socket (51–55). Perubahan ada di **pacing** dan **penanda t0**.
+
+| Baris | Kode | Penjelasan |
+|---|---|---|
+| 1–18 | Docstring | Scapy hanya merender bytes; pengiriman lewat raw socket; source port diganti per 256 paket agar tiap batch terlihat sebagai koneksi baru. |
+| 28–37 | `render_packet(proto, target, port)` | TCP = SYN murni; UDP = datagram; `bytes(pkt)` dirender sekali agar loop cepat. |
+| 41–49 | argparse | `--target`, `--proto`, `--port`, `--duration`, **`--rate`** (0 = secepat mungkin). |
+| 51 | `conf.verb = 0` | Matikan output verbose Scapy. |
+| 54–55 | raw socket + `IP_HDRINCL` | Menyediakan header IP sendiri; butuh root (di Mininet sudah root). |
+| 57–58 | `payload = render_packet(...)` / `delay = 1/rate if rate>0 else 0` | Payload awal + periode antar paket. |
+| 60–62 | `sent=0` / `t_start=time.time()` / `deadline=t_start+duration` | **`t_start` adalah t0 absolut** yang dipakai pacing dan penanda. |
+| 64–77 | `print(f'[flood] started ... t0_epoch={t_start:.6f}', flush=True)` | **Penanda mulai** dicetak tepat sebelum paket pertama. `flush=True` wajib agar runner bisa membacanya segera. `t0_epoch` = jam dinding, sehingga runner tidak perlu menebak dari waktu baca berkas. |
+| 79–88 | loop `while True` / cek `deadline` / ganti source port tiap 256 paket / `sock.sendto(...)` | Loop kirim murni; `sent` menghitung paket. |
+| 89–97 | `if delay:` / `ahead = (t_start + sent*delay) - time.time()` / `if ahead > 0: time.sleep(ahead)` | **Pacing jadwal absolut**: target waktu paket ke-`sent+1` dihitung dari `t_start`, bukan `sleep(1/rate)` per paket. Drift tidak menumpuk; tidur hanya bila masih lebih cepat dari jadwal. |
+| 98–99 | `except KeyboardInterrupt: pass` | Hentikan rapi. |
+| 101–104 | `elapsed` / `print('[flood] ... terkirim=... (~N pps)')` | Baris ringkasan yang diparse runner menjadi `flood_actual_pps`. |
+| 107–108 | entry point | — |
+
+**Implikasi metodologi:** `t0_epoch` + pacing absolut membuat `flood_actual_pps` ≈ `--rate` dan `detection_time` tidak lagi tercemar waktu import Scapy (0,5–1 s di WSL) atau jeda baca berkas.
+
+---
+
+## III.4 `experiments/run_experiment.py` (1.046 baris) — Runner + mode compare
+
+BAGIAN I §5 membedah versi 423 baris. Berikut **hanya bagian yang baru/berubah**; fungsi lama yang tidak berubah tetap dirujuk ke sana.
+
+### III.4a Docstring, import, peta algoritme (baris 1–154)
+
+| Baris | Kode | Penjelasan |
+|---|---|---|
+| 1–92 | Docstring | Daftar skenario, metrik, output, **mode `--algo`**, dan definisi metrik compare (detection_time jam dinding, detected_rate tidak sebanding, throughput_per_cpu memakai CPU fase serangan). |
+| 94–118 | import + path | `psutil`, `threading`, `datetime/timezone`, Mininet, topologi. |
+| 120–149 | `RESULTS_DIR`, `MITIGATION_CSV`, `ALGO_CONFIG`, `COMPARE_CSV` | **Satu sumber kebenaran**: `ALGO_CONFIG` memetakan `baseline|s2td|entropy` → file controller, CSV event, dan label. `COMPARE_CSV` terpisah agar skema lama tidak tercampur. |
+| 151–154 | `ATTACKER_IP='10.0.0.1'` / `THRESHOLD=env RATE_THRESHOLD` | Konstanta peran host & threshold baseline. |
+
+### III.4b Utilitas lama (baris 157–204)
+
+| Baris | Kode | Penjelasan |
+|---|---|---|
+| 160–204 | `wait_port`, `_ovs_lock`, `count_drop_rules`, `parse_ping_loss`, `count_mitigation_rows` | Sama seperti BAGIAN I §5b, dengan satu perubahan penting: `count_mitigation_rows(csv_path=None)` menerima path agar mode `--algo` membaca CSV algoritme yang benar. |
+
+### III.4c Utilitas baru mode compare (baris 207–391)
+
+| Baris | Kode | Penjelasan |
+|---|---|---|
+| 213–235 | `COMPARE_FIELDS` (21 kolom) | Skema stabil: `algo`, `repeat`, `flood_rate_pps`, `flood_actual_pps`, `detection_time_s`, `detection_time_poll_s`, `detected_rate_pps`, drop/FP/loss, CPU whole-run & attack-only, memori, `throughput_per_cpu`. Tanpa kolom per-host dinamis agar header tidak berubah antar `--legit-count`. |
+| 238–262 | `append_compare_row(row)` | Append aman: bila header file lama berbeda, file **diarsipkan** (`*_skema-lama_<ts>.csv`) lalu header baru ditulis — data lama tidak hilang dan `DictWriter` tidak error. |
+| 265–283 | `wait_flood_start(path, timeout=15, poll=0.02)` | Polling penanda `[flood] started`; fallback ke perilaku lama bila flooder versi lama. |
+| 286–307 | `flood_start_epoch(path)` | Regex `t0_epoch=([\d.]+)` dari baris penanda → float epoch, atau `None`. |
+| 310–322 | `parse_flood_actual(path)` | Regex `~([\d.]+) pps` dari baris akhir flooder → string angka. |
+| 325–339 | `first_event_epoch(rows)` | Ambil `ts_iso` (kolom ke-2) baris event pertama → `datetime`. |
+| 342–361 | `precise_detection_time(rows, t_flood_wall, max_s=120)` | `(ts_event - t0).total_seconds()`; `None` bila tidak ada event / t0 hilang / negatif / terlalu besar. Alasan: polling `ovs-ofctl` terkuantisasi 0,2 s dan punya lantai 0,01–0,05 s. |
+| 364–378 | `first_event_rate(rows)` | Ambil kolom `rate_pps` (indeks 5) dengan validasi numerik; informatif saja. |
+| 381–391 | `proc_jiffies(pid)` | Baca `utime+stime` langsung dari `/proc/<pid>/stat` sebagai ground truth independen dari psutil. |
+
+### III.4d Persiapan lingkungan (baris 394–495)
+
+| Baris | Kode | Penjelasan |
+|---|---|---|
+| 397–409 | `cleanup_stale_environment()` | `pkill -f osken-manager` + `mn -c` + jeda 1 s; mencegah controller yatim/zombie. |
+| 412–454 | `start_controller(log_path, threshold=None, algo='baseline', extra_env=None)` | Pilih `ALGO_CONFIG[algo]`; cari `osken-manager` relatif `sys.executable`; gabungkan env + override; spawn; tunggu port 6633; **validasi anti-zombie** (proses baru tidak boleh langsung mati). `extra_env` dipakai runner untuk `S2TD_LOG`/`S2TD_PROTECTED_IPS`/`ENTROPY_LOG`/`ENTROPY_PROTECTED_IPS`. |
+| 457–468 | `build_net(n_iot=3)` | Bangun `DDosTopo`; jumlah host legitimate = `n_iot`. |
+| 470–495 | `tail_controller_log(...)` | Live-view `[ctrl]` dari log controller. |
+
+### III.4e `run_scenario` (baris 498–882) — jantung runner
+
+| Baris | Kode | Penjelasan |
+|---|---|---|
+| 498–512 | signature + docstring | Parameter baru `algo=None`, `rate=0.0`, `repeat=1`, `subdir=None`. `algo=None` → **mode lama identik**; `algo=<x>` → mode compare. |
+| 513–524 | cek iperf3, hitung `victim_id`/`victim_ip`/`legit_hosts`, `eff_flash_rate` | Konvensi h1 attacker, h2..h(n+1) legit, h(n+2) victim. |
+| 526–540 | `compare`, `algo_name`, `algo_cfg`, `mitigation_csv`, `algo_env` | Pilih CSV yang ditulis **dan** dibaca; override IP victim agar proteksi mengikuti `--legit-count`. |
+| 542–547 | `ts`, `os.makedirs(RESULTS_DIR)`, `aux_dir` | `--subdir` hanya memindahkan file bukti; CSV event & ringkasan tetap di `results/`. |
+| 549–561 | cleanup, `tag`, path log/timeseries/flood, `start_controller`, `cpu_meter` | Nama file diberi tag algoritme + repeat agar tidak saling menimpa. |
+| 564–569 | tail thread | Live-view controller. |
+| 571–577 | `build_net`, `s1/h1/victim`, `rows_before` | `rows_before` = diff CSV untuk menghitung event milik run ini. |
+| 579–618 | timeseries + sampler thread | Sampler background dari t=0; tulis `t_rel_s,cpu_pct,mem_pct,jiffies,drop_rules` tiap 0,5 s; priming `cpu_percent(None)` + `sleep(0.5)` mencegah artefak sampel pertama. |
+| 620–631 | ping legitimate | Hanya untuk `baseline/mixed/flash_crowd`; jumlah paket dihitung dari total durasi. |
+| 636–686 | fase serangan `single/mixed` | Tunggu `t_start+warmup`; susun `flood_cmd`; **mode compare**: tambah `--rate`, simpan stdout ke file, `wait_flood_start` → `t_flood` monotonic + `t_flood_wall` dari `t0_epoch` (fallback `now`), lalu polling `count_drop_rules` 0,2 s sebagai `detection_time_poll_s`. Mode lama: perilaku persis seperti BAGIAN I §5d. |
+| 687–713 | fase `flash_crowd` | Server iperf3 UDP di victim + burst dari semua host legit; deteksi rule DROP = false positive. |
+| 715–755 | observasi & pembersihan | Join sampler, terminate flood/burst/iperf, hitung `events_this_run` & `fp_bans`, kumpulkan loss ping, tutup CSV/log, `net.stop()`, terminate controller. |
+| 757–787 | ringkasan dari timeseries | `fpr_pct`, `is_legit`, `summary` (detection_time polling, drop max/concurrent, CPU/mem) — skema lama. |
+| 789–862 | **cabang compare** | (791) `flood_actual_pps`; (797–800) `cpu_attack_*` hanya sampel `warmup ≤ t_rel ≤ warmup+attack_dur`; (804–807) `load_pps` = actual bila ada, else nominal; (809–811) loss mean/max; (815–817) `det_precise` fallback polling; (819–847) susun 21 kolom; (848) `append_compare_row`; (850–862) cetak hasil + path bukti. |
+| 864–882 | mode lama | Tulis `exp_summary.csv` + cetak ringkasan — **tidak berubah**. |
+
+### III.4f Threshold sweep & `main` (baris 885–1046)
+
+| Baris | Kode | Penjelasan |
+|---|---|---|
+| 885–934 | `run_threshold_sweep(...)` | Untuk tiap `T`: jalankan `mixed` (TPR) + `flash_crowd` (FPR), tulis `threshold_sweep_summary.csv`. Tidak berubah, tetap hanya untuk baseline. |
+| 937–982 | `main` + argparse | Argumen lama + **`--algo`**, **`--rate`**, **`--repeats`**, **`--repeat-start`**, **`--subdir`**. |
+| 984–997 | validasi | `repeats ≥ 1`, `repeat_start ≥ 1`; `--rate` tanpa `--algo` hanya memberi warning (backward-compat); `rate < 0` error. |
+| 999–1009 | cabang `threshold_sweep` | Menolak `--algo` (sweep threshold milik baseline), lalu panggil `run_threshold_sweep`. |
+| 1011–1025 | loop repeat | `repeat_no = repeat_start + i - 1`; panggil `run_scenario` dengan algo/rate/repeat/subdir. |
+| 1027–1042 | ringkasan multi-repeat | Tabel `rep/detect_s/actual_pps/cpu_avg/cpu_max/loss_max/tput-per-cpu` agar sebaran terlihat tanpa membuka CSV. |
+| 1045–1046 | entry point | — |
+
+---
+
+## III.5 `experiments/run_sweep_compare.py` (426 baris) — Orkestrator load sweep
+
+### III.5a Docstring, konstanta, utilitas (baris 1–131)
+
+| Baris | Kode | Penjelasan |
+|---|---|---|
+| 1–53 | Docstring | Tujuan, cara kerja (tidak menduplikasi logika; memanggil runner), urutan **rate → algo → repeat**, aturan berhenti, definisi metrik, cara pakai, dan output. |
+| 55–68 | import + `HERE/PROJECT_ROOT/RESULTS_DIR/RAW_CSV/RUNNER` | Path absolut agar skrip aman dijalankan dari mana pun. |
+| 70–74 | `ALGO_LABEL` | Label tampilan untuk tiga algoritme. |
+| 76–88 | `STATS_FIELDS` (22 kolom) | Skema `compare_stats.csv`: `n_runs/n_detected/det_miss`, deteksi mean/std/min/max, `flood_actual_mean_pps`, `detected_rate_mean_pps`, CPU attack/run, loss, FP, drops, `throughput_per_cpu`, `saturated`, `stop_reason`. |
+| 94–99 | `read_raw_rows()` | Baca seluruh baris `exp_summary_compare.csv`. |
+| 102–108 | `num(value)` | Konversi ke float; `None` untuk kosong/NaN (`v == v`). |
+| 111–118 | `col(rows, key)` | Ambil semua nilai numerik satu kolom. |
+| 121–127 | `mean_std(values)` | Mean + stddev sampel; stddev `None` bila `n < 2`. |
+| 130–131 | `fmt(value, nd=2)` | Format angka atau string kosong. |
+
+### III.5b Satu run (baris 134–179)
+
+| Baris | Kode | Penjelasan |
+|---|---|---|
+| 137–139 | `run_one(args, algo, rate, repeat, index, total)` / `before = len(read_raw_rows())` | Catat jumlah baris sebelum run untuk mengambil baris **baru** setelahnya (tahan terhadap CSV yang sudah berisi riwayat). |
+| 140–151 | susun `cmd` runner | `--scenario/--algo/--rate/--repeats 1/--repeat-start/--legit-count/--warmup/--flood-duration/--post` + `--subdir`. |
+| 153–162 | print progres, `subprocess.run(..., capture_output=True, timeout)` | Satu run = satu proses terisolasi; timeout mencegah hang. |
+| 164–172 | validasi hasil | Bila exit ≠ 0 atau tidak ada baris baru → cetak ekor stdout/stderr dan `SystemExit`. |
+| 174–179 | ambil baris terakhir, cetak `ok ... deteksi/cpu/loss`, return `(row, elapsed)` | Progres ringkas per run. |
+
+### III.5c Agregasi & merge (baris 182–283)
+
+| Baris | Kode | Penjelasan |
+|---|---|---|
+| 185–202 | `aggregate(args, algo, rate, rows)` | Kumpulkan deteksi, CPU attack, CPU peak, CPU run, loss, actual, detected rate, drops. |
+| 205–209 | `tput = actual_mean / cpu_mean` | Memakai beban **nyata**, bukan nominal, agar adil saat pacing tidak tercapai. |
+| 211–217 | aturan berhenti | `cpu_mean > stop_cpu` dan/atau `loss_worst > stop_loss` → `stop_reason`. |
+| 219–243 | return dict 22 kolom | `saturated='ya'/'tidak'`; `n_detected`/`det_miss` dari ketersediaan `detection_time_s`. |
+| 246–270 | `merge_levels(existing_path, new_levels)` | Baca CSV lama, gabung berdasarkan kunci `(algo, scenario, float(rate))`; baris baru menang; urutkan `(rate, urutan algo)`. Memungkinkan sweep bertahap tanpa duplikasi. |
+| 273–283 | `write_stats(levels, out_path)` | Tulis ulang seluruh CSV tiap titik selesai → hasil parsial tetap aman bila sweep dihentikan. |
+
+### III.5d `main` (baris 286–426)
+
+| Baris | Kode | Penjelasan |
+|---|---|---|
+| 289–319 | argparse | `--rates` (default `100,500,1000,1500`), `--repeats 3`, `--algos`, `--scenario mixed`, `--legit-count 3`, `--warmup 5`, `--flood-duration 10`, `--post 20`, `--stop-cpu 80`, `--stop-loss 1`, `--timeout 300`, `--subdir tahapD`, `--stats-out`, `--dry-run`. |
+| 321–336 | validasi | Wajib root (`geteuid==0`); runner harus ada; `repeats ≥ 1`; rate di-`sorted` & di-*dedup*; algoritme divalidasi terhadap `ALGO_LABEL`. |
+| 338–358 | cetak rencana | Total run maksimum, aturan berhenti, path output; `--dry-run` berhenti di sini. |
+| 360–367 | siapkan folder + state | `levels`, `saturated` (algo → alasan), `index`. |
+| 369–395 | loop utama | `for rate → for algo`: lewati algoritme jenuh; `for rep`: `run_one`; `aggregate`; `write_stats(merge_levels(...))`; cetak ringkas; bila `stop_reason` → tandai jenuh dan lewati rate lebih tinggi. |
+| 397–415 | tabel akhir | `merge_levels` sekali lagi agar invokasi bertahap ikut tampil; header `algo/rate/n/detik/cpu%/loss%/tput-cpu/status`. |
+| 417–422 | penutup | Total run, durasi menit, path output, timestamp. |
+| 425–426 | entry point | — |
+
+---
+
+## Alur besar FASE P1 (ringkasan satu paragraf)
+
+`run_sweep_compare.py` menyusun rencana **rate → algoritme → repeat** dan memanggil
+`run_experiment.py --algo <x> --rate <r> --repeats 1` untuk setiap run. Runner
+memilih controller dari `ALGO_CONFIG`, membersihkan lingkungan, membangun ulang
+topologi, menjalankan ping legitimate, lalu pada `t=warmup` meluncurkan
+`flood_scapy.py` dengan pacing. Flooder mencetak `[flood] started ... t0_epoch=...`
+sebelum paket pertama; runner memakai epoch itu sebagai t0 dan menghitung
+`detection_time_s` dari `ts_iso` event pertama di CSV algoritme (presisi
+milidetik). Selama run, sampler 0,5 s merekam CPU/memori/jumlah rule. Setelah
+run, runner menulis satu baris 21 kolom ke `exp_summary_compare.csv`; skrip sweep
+mengagregasi 3 repeat menjadi mean ± stddev di `compare_stats.csv`, dan berhenti
+menaikkan beban untuk algoritme yang sudah jenuh (CPU > 80% atau loss > 1%).
+Hasil final P1: 15 titik (5 rate × 3 algoritme), 45 run, 0 false positive, 0%
+loss, tanpa saturasi pada ≤3000 pps — dengan catatan metodologi bahwa perbedaan
+CPU baseline/entropi vs S2TD **tidak murni** berasal dari algoritme, melainkan
+ikut dipengaruhi flow caching (lihat README bagian *Keterbatasan*).

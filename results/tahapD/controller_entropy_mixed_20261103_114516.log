@@ -1,0 +1,19 @@
+/home/dionisius/ddos-venv/lib/python3.12/site-packages/os_ken/lib/hub.py:160: EventletDeprecationWarning: 
+Eventlet is deprecated. It is currently being maintained in bugfix mode, and
+we strongly recommend against using it for new projects.
+
+If you are already using Eventlet, we recommend migrating to a different
+framework.  For more detail see
+https://eventlet.readthedocs.io/en/latest/asyncio/migration.html
+
+  import eventlet
+1 RLock(s) were not greened, to fix this error make sure you run eventlet.monkey_patch() before importing any other modules.
+loading app ddos_guard_entropy.py
+loading app os_ken.controller.ofp_handler
+instantiating app ddos_guard_entropy.py of EntropyGuard
+EntropyGuard aktif | window=1.0s threshold=1.00 bit min_pkts=30 eval=0.5s ban=15s protected=['10.0.0.5'] | log=/mnt/c/Dionisius/SkripsiProject/results/mitigation_events_entropy.csv
+instantiating app os_ken.controller.ofp_handler of OFPHandler
+Switch 1 terhubung, table-miss terpasang
+ENTROPY: H=1.18 bit (thr=1.00) | N=62 | top=10.0.0.1 47.0pps
+ENTROPY MITIGASI: DROP rule terpasang utk 10.0.0.1 (hard_timeout=15s)
+ENTROPY event tercatat: src=10.0.0.1 rate=97.0pps H=0.78 bit

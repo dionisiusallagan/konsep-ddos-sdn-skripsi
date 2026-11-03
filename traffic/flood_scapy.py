@@ -61,6 +61,21 @@ def main():
     t_start = time.time()
     deadline = t_start + args.duration
 
+    # PENANDA MULAI (dipakai runner eksperimen).
+    # Dicetak tepat SEBELUM paket pertama dikirim, dengan flush, agar runner
+    # dapat menetapkan t0 pengukuran detection_time TANPA ikut menghitung
+    # waktu import scapy + pembuatan raw socket (0,5-1 s di WSL). Baris ini
+    # hanya menambah output; perilaku pengiriman tidak berubah.
+    #
+    # t0_epoch = jam dinding saat paket pertama dijadwalkan. Runner memakai
+    # angka ini sebagai t0 (BUKAN saat ia berhasil membaca berkas), sehingga
+    # jeda pembacaan berkas di WSL/drvfs tidak lagi memperkecil detection_time.
+    print(f'[flood] started proto={args.proto} '
+          f'target={args.target}:{args.port} '
+          f'rate={args.rate:.0f}pps duration={args.duration:.0f}s '
+          f't0_epoch={t_start:.6f}',
+          flush=True)
+
     try:
         while True:
             now = time.time()
@@ -72,7 +87,14 @@ def main():
             sock.sendto(payload, (args.target, args.port))
             sent += 1
             if delay:
-                time.sleep(delay)
+                # PACING JADWAL ABSOLUT: target waktu paket ke-(sent+1)
+                # dihitung dari t_start, bukan sleep(1/rate) per paket.
+                # Kelebihan: drift tidak menumpuk, dan tidur hanya dilakukan
+                # bila kita masih lebih cepat dari jadwal -> achieved rate
+                # lebih dekat ke --rate pada beban tinggi.
+                ahead = (t_start + sent * delay) - time.time()
+                if ahead > 0:
+                    time.sleep(ahead)
     except KeyboardInterrupt:
         pass
 

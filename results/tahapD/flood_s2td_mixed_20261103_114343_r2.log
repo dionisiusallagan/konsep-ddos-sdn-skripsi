@@ -1,0 +1,4 @@
+/home/dionisius/ddos-venv/lib/python3.12/site-packages/scapy/layers/tls/crypto/groups.py:25: CryptographyDeprecationWarning: Diffie-Hellman over finite fields (FFDH) is deprecated and support will be removed in a future release. Use a more modern key exchange algorithm.
+  from cryptography.hazmat.primitives.asymmetric.dh import DHParameterNumbers
+[flood] started proto=tcp target=10.0.0.5:80 rate=100pps duration=10s t0_epoch=1793681039.269751
+[flood] proto=tcp target=10.0.0.5:80 terkirim=1000 pkt dalam 10.0s (~100 pps)

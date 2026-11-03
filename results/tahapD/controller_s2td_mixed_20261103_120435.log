@@ -1,0 +1,36 @@
+/home/dionisius/ddos-venv/lib/python3.12/site-packages/os_ken/lib/hub.py:160: EventletDeprecationWarning: 
+Eventlet is deprecated. It is currently being maintained in bugfix mode, and
+we strongly recommend against using it for new projects.
+
+If you are already using Eventlet, we recommend migrating to a different
+framework.  For more detail see
+https://eventlet.readthedocs.io/en/latest/asyncio/migration.html
+
+  import eventlet
+1 RLock(s) were not greened, to fix this error make sure you run eventlet.monkey_patch() before importing any other modules.
+loading app ddos_guard_s2td.py
+loading app os_ken.controller.ofp_handler
+instantiating app ddos_guard_s2td.py of DDoSGuardS2TD
+S2TD aktif | T_poll=1.0s alpha=0.30 k_auto=3.0 floor=50pps T_verify=50pps T_confirm=2 top-N=5 warmup=3 ban=15s protected=['10.0.0.5'] | log=/mnt/c/Dionisius/SkripsiProject/results/mitigation_events_s2td.csv
+instantiating app os_ken.controller.ofp_handler of OFPHandler
+Switch 1 terhubung, table-miss terpasang
+Switch 1 terdaftar untuk polling S2TD
+S2TD POLL dpid=1 agg=0.0pps mu=4.0
+S2TD POLL dpid=1 agg=30.0pps mu=19.0
+S2TD TRIGGER dpid=1 agg=3034.4pps > thr=112.0 (k*mu=3.0*37.3, floor=50) -> Tahap 2
+S2TD VERIFY dpid=1 src=10.0.0.5 rate=1515.2pps > T_verify=50 (konsekutif 1/2)
+S2TD VERIFY dpid=1 src=10.0.0.1 rate=1500.2pps > T_verify=50 (konsekutif 1/2)
+S2TD POLL dpid=1 agg=3037.3pps mu=37.3
+S2TD TRIGGER dpid=1 agg=3037.3pps > thr=112.0 (k*mu=3.0*37.3, floor=50) -> Tahap 2
+S2TD VERIFY dpid=1 src=10.0.0.5 rate=1518.2pps > T_verify=50 (konsekutif 2/2)
+S2TD SKIP: 10.0.0.5 memenuhi kriteria namun diproteksi (kemungkinan balasan server) -> tidak di-ban
+S2TD VERIFY dpid=1 src=10.0.0.1 rate=1503.2pps > T_verify=50 (konsekutif 2/2)
+S2TD MITIGASI: DROP rule terpasang utk 10.0.0.1 (hard_timeout=15s)
+S2TD TRIGGER dpid=1 agg=688.6pps > thr=112.0 (k*mu=3.0*37.3, floor=50) -> Tahap 2
+S2TD VERIFY dpid=1 src=10.0.0.5 rate=676.6pps > T_verify=50 (konsekutif 1/2)
+S2TD POLL dpid=1 agg=30.0pps mu=31.7
+S2TD POLL dpid=1 agg=30.0pps mu=30.3
+S2TD POLL dpid=1 agg=30.0pps mu=30.6
+S2TD POLL dpid=1 agg=30.0pps mu=30.2
+S2TD POLL dpid=1 agg=30.0pps mu=30.0
+Switch 1 keluar, dihapus dari polling
